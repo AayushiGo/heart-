@@ -2,12 +2,18 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
-console.clear();
+// Postprocessing imports
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 
 // Scene / Camera / Renderer
 let scene = new THREE.Scene();
+scene.background = new THREE.Color(0x011111); // black background
+
 let camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 1000);
-camera.position.set(0, 2, 6);
+camera.position.set(0, 2, 8);
+
 let renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
 document.body.appendChild(renderer.domElement);
@@ -16,76 +22,109 @@ window.addEventListener("resize", () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
 });
 
 let controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
 // Lights
-let dirLight = new THREE.DirectionalLight(0xffffff, 1);
-dirLight.position.set(5, 10, 7);
-scene.add(dirLight);
-scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+let keyLight = new THREE.DirectionalLight(0xffffff, 1.2);
+keyLight.position.set(5, 8, 10);
+scene.add(keyLight);
 
-// Shader uniforms
+let fillLight = new THREE.DirectionalLight(0xffffff, 0.6);
+fillLight.position.set(-6, 4, -4);
+scene.add(fillLight);
+
+let rimLight = new THREE.DirectionalLight(0xffffff, 1.0);
+rimLight.position.set(0, 10, -10);
+scene.add(rimLight);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+/* ------------------ HEART SHADER ------------------ */
 let uniforms = {
   time: { value: 0 },
-  totalLength: { value: 10 },
-  pipeFittingAt: { value: 0 },
-  pipeFittingWidth: { value: 1 },
-  pipeFittingColor: { value: new THREE.Color(0x0000ff) } // yellow highlight
+  baseColor: { value: new THREE.Color(0x000000) }, // black base
+  lightPos: { value: new THREE.Vector3(5, 10, 7) },
+  cameraPos: { value: new THREE.Vector3() },
+
+  
+  totalLength: { value: 1.0 },
+  pipeFittingAt: { value: 0.0 },
+  pipeFittingWidth: { value: 0.25 },
+  pipeFittingColor: { value: new THREE.Color(0x5cc9FF) } // BLUE glow
 };
 
-// Custom ShaderMaterial (Heart + pipe fitting animation)
 let heartMaterial = new THREE.ShaderMaterial({
   uniforms: uniforms,
   side: THREE.DoubleSide,
   defines: { USE_UV: "" },
   vertexShader: `
+    varying vec3 vNormal;
+    varying vec3 vPosition;
     varying vec2 vUv;
+
     void main() {
+      vNormal = normalize(normalMatrix * normal);
+      vPosition = vec3(modelViewMatrix * vec4(position, 1.0));
       vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.2);
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
     }
   `,
   fragmentShader: `
     #define S(a, b, c) smoothstep(a, b, c)
-    varying vec2 vUv;
-    uniform float time;
+
+    uniform vec3 lightPos;
+    uniform vec3 cameraPos;
+    uniform vec3 baseColor;
+
     uniform float totalLength;
     uniform float pipeFittingAt;
     uniform float pipeFittingWidth;
     uniform vec3 pipeFittingColor;
+    uniform float time;
 
-    float heartShape(vec2 p) {
-      p = p * 2.0 - 1.0; // center at (0,0)
-      float x = p.x;
-      float y = p.y;
-      return pow(x*x + y*y - 1.0, 3.0) - x*x*y*y*y;
-    }
+    varying vec3 vNormal;
+    varying vec3 vPosition;
+    varying vec2 vUv;
 
     void main() {
-      // Base heart color
-      float h = heartShape(vUv * 1.5);
-      vec3 baseColor = mix(vec3(1.0, 0.0, 0.2), vec3(0.1), step(0.0, h));
+      // phong lighting
+      vec3 normal = normalize(vNormal);
+      vec3 lightDir = normalize(lightPos - vPosition);
+      vec3 viewDir = normalize(cameraPos - vPosition);
 
-      // Animate pipeFittingAt
-      float movingAt = mod(pipeFittingAt + time * 2.2, totalLength);
-      float normAt = movingAt / totalLength;
+      float diff = max(dot(normal, lightDir), 0.0);
+      vec3 reflectDir = reflect(-lightDir, normal);
+      float spec = pow(max(dot(viewDir, reflectDir), 0.0), 64.0);
+
+      vec3 color = baseColor * diff + vec3(1.0) * spec * 0.6;
+
+      // moving highlight band (horizontal)
+      float normAt = pipeFittingAt / totalLength;
       float normWidth = pipeFittingWidth / totalLength;
       float hWidth = normWidth * 0.5;
       float fw = fwidth(vUv.x);
-      float f = S(hWidth + fw, hWidth, abs(vUv.x - normAt));
 
-      // Blend highlight
-      vec3 finalColor = mix(baseColor, pipeFittingColor, f);
+      float band = S(hWidth + fw, hWidth, abs(vUv.x - normAt));
 
-      gl_FragColor = vec4(finalColor, 1.2);
+      // pulsating glow
+      float pulse = 0.6 + 0.4 ;
+
+      // glowing additive BLUE
+      vec3 glow = pipeFittingColor * band * (2.5 * pulse);
+
+      // add glow on top
+      color += glow;
+
+      gl_FragColor = vec4(color, 1.0);
     }
-  `
+  `,
 });
 
-// Load GLTF and apply heart shader
+// Load GLTF Heart
 const loader = new GLTFLoader();
 loader.load("heart.glb", (gltf) => {
   gltf.scene.traverse((child) => {
@@ -93,14 +132,33 @@ loader.load("heart.glb", (gltf) => {
       child.material = heartMaterial;
     }
   });
+  gltf.scene.position.y = -3;
   scene.add(gltf.scene);
-  gltf.scene.position.y -= 3
 });
 
-// Animate
+/* ------------------ POSTPROCESSING: BLOOM ------------------ */
+let composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+let bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(innerWidth, innerHeight),
+  0.5, // strength
+  0.4, // radius
+  0.85 // threshold
+);
+composer.addPass(bloomPass);
+
+/* ------------------ ANIMATE ------------------ */
 let clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  uniforms.time.value = clock.getElapsedTime(); // update time
+  let t = clock.getElapsedTime();
+
+  uniforms.time.value = t;
+  uniforms.cameraPos.value.copy(camera.position);
+
+  // animate highlight band moving
+  uniforms.pipeFittingAt.value = (t * 0.2) % 1.0;
+
   controls.update();
-  renderer.render(scene, camera);
-});
+  composer.render(); // render with bloom
+}); 
